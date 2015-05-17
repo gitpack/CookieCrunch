@@ -8,62 +8,169 @@
 
 import UIKit
 import SpriteKit
-
-extension SKNode {
-    class func unarchiveFromFile(file : NSString) -> SKNode? {
-        if let path = NSBundle.mainBundle().pathForResource(file, ofType: "sks") {
-            var sceneData = NSData(contentsOfFile: path, options: .DataReadingMappedIfSafe, error: nil)!
-            var archiver = NSKeyedUnarchiver(forReadingWithData: sceneData)
-            
-            archiver.setClass(self.classForKeyedUnarchiver(), forClassName: "SKScene")
-            let scene = archiver.decodeObjectForKey(NSKeyedArchiveRootObjectKey) as GameScene
-            archiver.finishDecoding()
-            return scene
-        } else {
-            return nil
-        }
-    }
-}
+import AVFoundation
 
 class GameViewController: UIViewController {
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-
-        if let scene = GameScene.unarchiveFromFile("GameScene") as? GameScene {
-            // Configure the view.
-            let skView = self.view as SKView
-            skView.showsFPS = true
-            skView.showsNodeCount = true
-            
-            /* Sprite Kit applies additional optimizations to improve rendering performance */
-            skView.ignoresSiblingOrder = true
-            
-            /* Set the scale mode to scale to fit the window */
-            scene.scaleMode = .AspectFill
-            
-            skView.presentScene(scene)
+    var scene: GameScene!
+    var level: Level!
+    var movesLeft = 0
+    var score = 0
+    var tapGestureRecognizer: UITapGestureRecognizer!
+    
+    lazy var backgroundMusic: AVAudioPlayer = {
+        let url = NSBundle.mainBundle().URLForResource("Mining by Moonlight", withExtension: "mp3")
+        let player = AVAudioPlayer(contentsOfURL: url, error: nil)
+        player.numberOfLoops = -1
+        return player
+        }()
+    
+    
+    @IBOutlet weak var targetLabel: UILabel!
+    @IBOutlet weak var movesLabel: UILabel!
+    @IBOutlet weak var scoreLabel: UILabel!
+    
+    @IBOutlet weak var gameOverPanel: UIImageView!
+    
+    @IBOutlet weak var shuffleButton: UIButton!
+    
+    @IBAction func shuffleButtonPressed(AnyObject) {
+        shuffle()
+        decrementMoves()
+    }
+    
+    func beginGame() {
+        movesLeft = level.maximumMoves
+        score = 0
+        updateLabels()
+        level.resetComboMultiplier()
+        scene.animateBeginGame() {
+            self.shuffleButton.hidden = false
         }
+        shuffle()
     }
-
-    override func shouldAutorotate() -> Bool {
-        return true
+    
+    func shuffle() {
+        scene.removeAllCookieSprites()
+        let newCookies = level.shuffle()
+        scene.addSpritesForCookies(newCookies)
     }
-
-    override func supportedInterfaceOrientations() -> Int {
-        if UIDevice.currentDevice().userInterfaceIdiom == .Phone {
-            return Int(UIInterfaceOrientationMask.AllButUpsideDown.rawValue)
-        } else {
-            return Int(UIInterfaceOrientationMask.All.rawValue)
-        }
-    }
-
-    override func didReceiveMemoryWarning() {
-        super.didReceiveMemoryWarning()
-        // Release any cached data, images, etc that aren't in use.
-    }
-
+    
     override func prefersStatusBarHidden() -> Bool {
         return true
     }
-}
+    
+    override func shouldAutorotate() -> Bool {
+        return true
+    }
+    
+    override func supportedInterfaceOrientations() -> Int {
+        return Int(UIInterfaceOrientationMask.AllButUpsideDown.rawValue)
+    }
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        // Configure the view.
+        let skView = view as! SKView
+        skView.multipleTouchEnabled = false
+        
+        // Create and configure the scene.
+        scene = GameScene(size: skView.bounds.size)
+        scene.scaleMode = .AspectFill
+        
+        level = Level(filename: "Level_1")
+        scene.level = level
+        scene.addTiles()
+        scene.swipeHandler = handleSwipe
+        gameOverPanel.hidden = true
+        shuffleButton.hidden = true
+        // Present the scene.
+        skView.presentScene(scene)
+        backgroundMusic.play()
+        beginGame()
+    }
+    
+    func showGameOver() {
+        gameOverPanel.hidden = false
+        scene.userInteractionEnabled = false
+        
+        scene.animateGameOver() {
+            self.tapGestureRecognizer = UITapGestureRecognizer(target: self, action: "hideGameOver")
+            self.view.addGestureRecognizer(self.tapGestureRecognizer)
+        }
+        shuffleButton.hidden = true
+    }
+
+    
+    func hideGameOver() {
+        view.removeGestureRecognizer(tapGestureRecognizer)
+        tapGestureRecognizer = nil
+        
+        gameOverPanel.hidden = true
+        scene.userInteractionEnabled = true
+        
+        beginGame()
+    }
+    
+    func beginNextTurn() {
+        level.resetComboMultiplier()
+        level.detectPossibleSwaps()
+        view.userInteractionEnabled = true
+        decrementMoves()
+    }
+
+    func decrementMoves() {
+        --movesLeft
+        updateLabels()
+        if score >= level.targetScore {
+            gameOverPanel.image = UIImage(named: "LevelComplete")
+            showGameOver()
+        } else if movesLeft == 0 {
+            gameOverPanel.image = UIImage(named: "GameOver")
+            showGameOver()
+        }
+    }
+    
+    func handleMatches() {
+        let chains = level.removeMatches()
+        if chains.count == 0 {
+            beginNextTurn()
+            return
+        }
+        scene.animateMatchedCookies(chains) {
+            for chain in chains {
+                self.score += chain.score
+            }
+            self.updateLabels()
+            let columns = self.level.fillHoles()
+            self.scene.animateFallingCookies(columns) {
+                let columns = self.level.topUpCookies()
+                self.scene.animateNewCookies(columns) {
+                    self.handleMatches()
+                }
+            }
+        }
+    }
+    func handleSwipe(swap: Swap) {
+        view.userInteractionEnabled = false
+        
+        if level.isPossibleSwap(swap) {
+            level.performSwap(swap)
+            scene.animateSwap(swap, completion: handleMatches)
+                self.view.userInteractionEnabled = true
+            
+        } else {
+    scene.animateInvalidSwap(swap) {
+    self.view.userInteractionEnabled = true
+                }
+        }
+    }
+    
+    func updateLabels() {
+        targetLabel.text = String(format: "%ld", level.targetScore)
+        movesLabel.text = String(format: "%ld", movesLeft)
+        scoreLabel.text = String(format: "%ld", score)
+    }
+    
+    
+}	
